@@ -1,0 +1,187 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  nameEnc      Bytes?
+  rutEnc       Bytes?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  settings    UserSettings?
+  roles       UserRole[]
+  permissions UserPermission[]
+  balances    Balance[]
+  accounts    Account[]        @relation("OwnerAccounts")
+  cards       Card[]
+  shares      AccountShare[]
+  attributes  Attribute[]
+}
+
+model UserSettings {
+  userId              String  @id
+  lowBalanceThreshold Decimal @default(0)
+  currency            String  @default("CLP")
+  user                User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Role {
+  id    String     @id @default(cuid())
+  code  String     @unique
+  users UserRole[]
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model Permission {
+  id    String           @id @default(cuid())
+  code  String           @unique
+  desc  String
+  users UserPermission[]
+}
+
+model UserPermission {
+  userId       String
+  permissionId String
+  enabled      Boolean    @default(true)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+}
+
+model Balance {
+  id         String   @id @default(cuid())
+  userId     String
+  month      Int
+  year       Int
+  salaryCLP  Decimal
+  savingsCLP Decimal  @default(0)
+  notes      String?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, month, year])
+}
+
+model Card {
+  id       String    @id @default(cuid())
+  userId   String
+  nameEnc  Bytes
+  bankType CardType
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accounts Account[]
+}
+
+enum CardType {
+  DEBIT
+  CREDIT
+}
+
+enum AccountType {
+  COMERCIAL
+  CASA
+  SUSCRIPCION
+  OTRO
+}
+
+model Account {
+  id               String      @id @default(cuid())
+  ownerId          String
+  titleEnc         Bytes
+  descriptionEnc   Bytes?
+  debtorNameEnc    Bytes?
+  type             AccountType
+  isSubscription   Boolean     @default(false)
+  installments     Int?
+  amountTotalCLP   Decimal
+  amountPerInstCLP Decimal
+  cardId           String?
+  createdAt        DateTime    @default(now())
+
+  owner    User               @relation("OwnerAccounts", fields: [ownerId], references: [id], onDelete: Cascade)
+  card     Card?              @relation(fields: [cardId], references: [id], onDelete: SetNull)
+  schedule Installment[]
+  shares   AccountShare[]
+  tags     AccountAttribute[]
+
+  @@index([ownerId, type])
+}
+
+model Installment {
+  id        String            @id @default(cuid())
+  accountId String
+  month     Int
+  year      Int
+  amountCLP Decimal
+  status    InstallmentStatus @default(PENDING)
+  account   Account           @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, month, year])
+  @@index([year, month, status])
+}
+
+enum InstallmentStatus {
+  PENDING
+  PAID
+  SKIPPED
+}
+
+model AccountShare {
+  accountId String
+  userId    String
+  canView   Boolean @default(true)
+  canEdit   Boolean @default(false)
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([accountId, userId])
+}
+
+enum AttributeKind {
+  BANK
+  COMMERCIAL_HOUSE
+  DEBTOR
+  CUSTOM
+}
+
+model Attribute {
+  id      String             @id @default(cuid())
+  userId  String
+  kind    AttributeKind
+  key     String
+  nameEnc Bytes
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usedBy  AccountAttribute[]
+
+  @@unique([userId, kind, key])
+}
+
+model AccountAttribute {
+  accountId   String
+  attributeId String
+  account     Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  attribute   Attribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+
+  @@id([accountId, attributeId])
+}
+
+model FeatureFlag {
+  key     String  @id
+  enabled Boolean @default(false)
+}

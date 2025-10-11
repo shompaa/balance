@@ -1,0 +1,695 @@
+¡Excelente nivel de detalle! Con esto ya puedo proponerte **arquitectura, stack y un backlog/todo list priorizado** para empezar hoy mismo. Voy a asumir **Next.js 15 + App Router** (RSC + Server Actions) en monolito, y Postgres como DB. Más abajo te dejo tareas por sprints, modelos de datos, endpoints/server actions, y decisiones clave (CI/CD, logging, seguridad, PDFs/screenshots, etc.).
+
+---
+
+# Arquitectura propuesta (alto nivel)
+
+* **Frontend/Backend monolito**: Next.js 15 (App Router), React Server Components, **Server Actions** para mutaciones simples, **Route Handlers** para integraciones (PDF/WhatsApp).
+* **DB**: **PostgreSQL** (Neon, Supabase o RDS según despliegue). ORM **Prisma**.
+* **Auth**: **Auth.js (NextAuth)** con email+password (privado) y posibilidad de agregar OAuth más adelante.
+* **UI/Design system**: Tailwind + **shadcn/ui** (se monta local; luego extraemos a lib). Tokens de diseño desde el día 1.
+* **Gráficos**: Recharts o Chart.js (client components aislados).
+* **Exportables**:
+
+  * **PDF** server-side (Playwright + headless Chromium en función serverless compatible; alternativa @react-pdf si prefieres 100% JS).
+  * **Screenshot**: Playwright a una ruta protegida con query (render estático de la vista).
+* **Mensajería WhatsApp**: wrapper para **Twilio** (o WATI/Meta Cloud API), disparo manual desde UI.
+* **Deploy**: **Vercel** (staging desde `develop`, producción desde `main`). DB gestionada (Neon/Supabase).
+* **Observabilidad**: logs estructurados (pino/pino-pretty en dev). En Vercel → consola + posibilidad de Logtail/Better Stack (gratis) luego.
+* **Seguridad**:
+
+  * Cifrado **a nivel de campo** (names, RUT, nombres de cuenta): **AES-256-GCM** con clave KMS/ENV.
+  * Hash fuerte para password (bcrypt/argon2).
+  * AutZ fina por **tabla `UserPermission`** y **feature flags**.
+
+---
+
+# Modelo de datos (Prisma – inicial)
+
+```prisma
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String
+  nameEnc       Bytes?   // cifrado AES
+  rutEnc        Bytes?   // cifrado AES
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  roles         UserRole[]
+  permissions   UserPermission[]
+  balances      Balance[]
+  accounts      Account[]        // “cuentas” creadas por este usuario
+  shares        AccountShare[]   // accesos concedidos
+}
+
+model Role {
+  id    String @id @default(cuid())
+  code  String @unique // 'admin' | 'user'
+  users UserRole[]
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id])
+  role   Role @relation(fields: [roleId], references: [id])
+  @@id([userId, roleId])
+}
+
+model Permission {
+  id   String @id @default(cuid())
+  code String @unique // e.g. 'module.reports.view'
+  desc String
+  users UserPermission[]
+}
+
+model UserPermission {
+  userId       String
+  permissionId String
+  enabled      Boolean @default(true)
+  user         User       @relation(fields: [userId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+  @@id([userId, permissionId])
+}
+
+model Balance { // Snapshot mensual por usuario (ej.: 2025-10)
+  id          String   @id @default(cuid())
+  userId      String
+  month       Int      // 1-12
+  year        Int
+  salaryCLP   Decimal  // sueldo “congelado” en ese balance
+  savingsCLP  Decimal  @default(0)
+  notes       String?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id])
+  // Derivados vía vistas/queries: totalDeudaMes, etc.
+  @@unique([userId, month, year])
+}
+
+model Card {
+  id        String   @id @default(cuid())
+  userId    String
+  nameEnc   Bytes    // “CMR”, “Santander”, etc. (cifrado opcional)
+  bankType  CardType // 'DEBIT' | 'CREDIT'
+  user      User     @relation(fields: [userId], references: [id])
+  accounts  Account[]
+}
+
+enum CardType { DEBIT CREDIT }
+
+model Account { // “cuenta/gasto”
+  id             String   @id @default(cuid())
+  ownerId        String   // usuario creador/propietario
+  titleEnc       Bytes    // cifrado
+  descriptionEnc Bytes?
+  debtorNameEnc  Bytes?   // por si es prestada a otra persona
+  type           AccountType // SERVICIO, BANCARIA, COMERCIAL, ETC
+  isSubscription Boolean   @default(false)
+  installments   Int?      // n° cuotas (si no subscript.)
+  amountCLP      Decimal   // monto total (si cuotas, total; podemos guardar amountPerInstallment si prefieres)
+  cardId         String?
+  createdAt      DateTime  @default(now())
+  owner          User      @relation(fields: [ownerId], references: [id])
+  card           Card?     @relation(fields: [cardId], references: [id])
+  schedule       Installment[]
+  shares         AccountShare[]
+}
+
+enum AccountType { SERVICIO BANCARIA COMERCIAL OTRO }
+
+model Installment { // proyección mensual de pagos
+  id         String   @id @default(cuid())
+  accountId  String
+  month      Int
+  year       Int
+  amountCLP  Decimal
+  status     InstallmentStatus @default(PENDING) // PENDING/PAID/SKIPPED
+  account    Account  @relation(fields: [accountId], references: [id])
+  @@unique([accountId, month, year])
+}
+
+enum InstallmentStatus { PENDING PAID SKIPPED }
+
+model AccountShare { // permisos para que otro usuario vea una cuenta
+  accountId String
+  userId    String // quien recibe acceso
+  canView   Boolean @default(true)
+  canEdit   Boolean @default(false)
+  account   Account @relation(fields: [accountId], references: [id])
+  user      User    @relation(fields: [userId], references: [id])
+  @@id([accountId, userId])
+}
+
+model FeatureFlag {
+  key       String @id
+  enabled   Boolean @default(false)
+  // scope opcional por user/role más adelante
+}
+```
+
+**Notas clave**
+
+* “Sueldo” no es una entidad global: se **congela en `Balance`** por mes y año. Si cambias el sueldo, solo afecta **el balance del mes actual** (o el que edites).
+* Para **cuotas**, generamos `Installment` por mes (p. ej. 3 cuotas → 3 filas en meses consecutivos).
+* Campos sensibles `*Enc` cifrados con AES-GCM (nonce + authTag almacenados junto al ciphertext).
+
+---
+
+# Flujo principal (MVP)
+
+1. Login/registro.
+2. Crear **Balance** del mes (set sueldo + ahorro opcional).
+3. Crear **Cuenta**: título, descripción, deudor, tarjeta, tipo, suscripción (sí/no), cuotas (si aplica), monto.
+4. Generar **schedule** (`Installment[]`) automáticamente para los meses correspondientes.
+5. **Vista mensual**: total deuda del mes (suma de `Installment.PENDING`), sueldo - deuda - ahorro = **restante**.
+6. Exportar **PDF/screenshot** del mes (filtros por deudor, por banco/tarjeta, por tipo).
+7. Alertas:
+
+   * umbral de saldo restante bajo (umbral configurable por usuario),
+   * “monto muy alto” por cuenta configurable,
+   * vencimientos del mes (PENDING sin pagar a X días de fin de mes).
+
+---
+
+# Endpoints / Server Actions (inicial)
+
+* `app/(auth)/login`, `register` → Auth.js (credentials).
+* `app/api/flags/[key]/route.ts` (GET admin-only).
+* `app/(dashboard)/balances/[year]/[month]` (RSC)
+
+  * **server actions**: `upsertBalance({year, month, salaryCLP, savingsCLP})`.
+* `app/(dashboard)/accounts`
+
+  * `createAccount(data)`: valida, crea cuenta y **genera Installments**.
+  * `updateAccount(data)`, `deleteAccount(id)` (soft-delete si quieres).
+  * `shareAccount({accountId, userEmail, canEdit})`.
+* `app/api/export/pdf?year=YYYY&month=MM&filter=...` (GET → PDF)
+* `app/api/export/screenshot?...` (GET → PNG)
+* `app/api/notify/whatsapp` (POST) payload: target + exportId/url.
+
+---
+
+# UI / Páginas (MVP)
+
+* **/login, /register**
+* **/dashboard** (overview actual + tarjetas: KPIs, gráficos de composición por tipo y por tarjeta, alerta de umbral)
+* **/balances/[YYYY]/[MM]** (tabla mensual: sueldo, ahorro, total cuotas del mes, restante; filtros por deudor/tarjeta/tipo; botones PDF/PNG)
+* **/accounts/new** y **/accounts/[id]** (form; si `isSubscription` = true, ocultar campo “cuotas”)
+* **/admin/permissions** (toggle por usuario y por feature flag)
+* **/admin/logs** (simple visor de eventos)
+
+---
+
+# Backlog / TODO list priorizado (con criterios de aceptación)
+
+## Epic A — Fundaciones (Sprint 0)
+
+1. **Setup repo + Tooling**
+
+   * Next 15 (App Router), TypeScript, Tailwind + shadcn/ui, ESLint + Prettier, Husky + lint-staged.
+   * **AC**: `pnpm dev` arriba; PR checks ejecutan lint y tests.
+2. **Prisma + Postgres**
+
+   * Esquema inicial ↑, migración `prisma migrate`.
+   * **AC**: `prisma db push`/`migrate deploy` en staging ok.
+3. **Auth.js (credentials)**
+
+   * Registro + login + session; middleware de protección de rutas.
+   * **AC**: Usuario autenticado accede a `/dashboard`; no autenticado → `/login`.
+4. **Cifrado de campos sensibles**
+
+   * Utilidad `encrypt/decrypt` AES-GCM; claves en `ENV`.
+   * **AC**: Creas cuenta y al ver en DB el `titleEnc` es binario; desencripta en UI.
+
+## Epic B — Núcleo de gastos mensuales (Sprint 1)
+
+5. **Modelo Balance mensual**
+
+   * CRUD mínimo + “congelar” sueldo/savings por mes.
+   * **AC**: cambiar sueldo en octubre no altera septiembre.
+6. **Cuentas y cuotas**
+
+   * Form con validación: suscripción oculta “cuotas”; si no es suscripción, `installments` requerido.
+   * Generador de `Installment` mes a mes (manejo cambio de año).
+   * **AC**: crear compra 3 cuotas en octubre → aparece en oct/nov/dic.
+7. **Vista mensual con filtros**
+
+   * Tabla paginada + filtros (deudor, tarjeta, tipo). Totales: deuda del mes, restante.
+   * **AC**: filtros afectan totales y exportes.
+
+## Epic C — Exportes y evidencias (Sprint 2)
+
+8. **Export PDF**
+
+   * Ruta `/api/export/pdf` (Playwright o @react-pdf).
+   * **AC**: descarga un PDF con cabecera (mes/año/usuario), tabla filtrada y totales; versión “por deudor” y “por banco”.
+9. **Screenshot**
+
+   * `/api/export/screenshot` con PNG de la vista mensual sin UI redundante.
+   * **AC**: imagen legible < 1MB con tabla y totales.
+
+## Epic D — Compartición y permisos (Sprint 2)
+
+10. **Shares de cuentas**
+
+    * Agregar usuario por email → `AccountShare`.
+    * **AC**: usuario invitado ve (read-only o editable) según flags; otros no ven.
+11. **Permisos y Feature Flags (admin)**
+
+    * UI admin para togglear `UserPermission` + `FeatureFlag`.
+    * **AC**: componentes en el front se ocultan con `if (hasPermission('...'))`.
+
+## Epic E — Alertas y gráficos (Sprint 3)
+
+12. **Alertas configurables**
+
+    * Umbral de saldo restante por usuario; alerta “monto alto por cuenta” configurable.
+    * **AC**: si restante < umbral, banner rojo; si una cuenta > X CLP, etiqueta/tooltip.
+13. **Dashboards**
+
+    * Gráfico de composición por **tipo** y por **tarjeta**, tendencia de deuda próximos 6 meses.
+    * **AC**: datos se regeneran al crear/editar cuentas.
+
+## Epic F — WhatsApp (Sprint 3)
+
+14. **Integración WhatsApp (opcional MVP+)**
+
+    * Config Twilio/Meta + envío de PDF/PNG a contacto.
+    * **AC**: desde vista mensual → “Enviar por WhatsApp” → confirma entrega.
+
+## Epic G — Operación (continuo)
+
+15. **Logs estructurados**
+
+    * Librería pino; contexto: `module.action.status.msg`.
+    * **AC**: ejemplo `accounts.create.201.created`.
+16. **Seeds y datos de demo**
+17. **Política de backup** (dump diario/semana en staging/prod).
+
+---
+
+# Testing y calidad
+
+* **Coverage objetivo 80%**:
+
+  * Unitarios: utils (cifrado), generador de cuotas, cálculos de totales.
+  * Componentes críticos (forms) con React Testing Library.
+  * **E2E**: Playwright/Testing Library para flujos: login → crear balance → crear cuenta (3 cuotas) → ver meses → exportar PDF.
+* **Tipos estrictos** (`"strict": true`), Zod para validar payloads de forms y server actions.
+* **Security tests**: acceso a cuentas compartidas, fuga de datos, SSRF/CSRF (Auth.js ya protege, reforzar `sameSite:lax`, CSRF en credenciales si procede).
+
+---
+
+# CI/CD
+
+* **GitHub Actions**
+
+  * Workflow `ci.yml`: lint, typecheck, unit y e2e (headless), coverage gate ≥ 80%.
+  * Workflow `deploy.yml`: si branch `develop` → Vercel (preview/staging); `main` → producción. Variables de entorno separadas por entorno (DB_URL, ENCRYPTION_KEY, TWILIO_* si aplica).
+* **Vercel**
+
+  * Build con Turbopack (dev) y `next build`.
+  * Rutas serverless para export y WhatsApp. Si Playwright requiere binarios, usa el runtime soportado (hay recetas de Playwright en Vercel); si se complica, plan B: @react-pdf.
+
+---
+
+# Logging (formato sugerido)
+
+Prefijo: `context.entity.action.status.message`
+
+* Ej.: `balances.upsert.200.ok`, `accounts.create.400.validation-failed`, `export.pdf.500.render-error`.
+  Campos JSON: `{ userId, requestId, route, durationMs, details }`.
+  Persistencia: consola (Vercel) + opcional **Logtail/Better Stack** para consultas.
+
+---
+
+# Seguridad
+
+* **Cifrado de campo**: helper:
+
+  * `encrypt(value) -> { iv, ciphertext, tag }` (guardado en `Bytes`).
+  * `decrypt({iv,ciphertext,tag}) -> value`.
+* **RBAC + permisos granulares**: `Role` (`admin`, `user`) + `Permission` (toggler).
+* **Rate limit** a rutas sensibles (login/export) con `@upstash/ratelimit` (opcional).
+* **Política de privacidad**: como es personal/privado, bastará .env y rotación de claves.
+
+---
+
+# Roadmap rápido por sprints
+
+* **Sprint 0 (3–5 días)**: Setup, Auth, Prisma, cifrado, Balance CRUD.
+* **Sprint 1 (5–7 días)**: Cuentas + cuotas + vista mensual con filtros.
+* **Sprint 2 (5–7 días)**: Export PDF/PNG + compartir cuentas + panel admin (permisos/flags).
+* **Sprint 3 (4–6 días)**: Alertas + dashboards + WhatsApp.
+
+*(Los tiempos son orientativos para organizar el trabajo; podemos ajustarlos al avanzar.)*
+
+---
+
+# Próximos pasos inmediatos (te propongo hacer ahora)
+
+1. Confirmar: **¿Playwright (PDF/screenshot) o @react-pdf para empezar?**
+2. Confirmar proveedor de **Postgres** (Neon/Supabase/otro).
+3. ¿Guardamos **monto total** y calculamos `amountPerInstallment` (= total/cuotas), o guardamos ambos? (Yo guardaría ambos para redondeos exactos).
+4. ¿Tipos de cuenta exactos que quieres preseedear? (SERVICIO, BANCARIA, COMERCIAL, EDUCACIÓN, SALUD, SUSCRIPCIÓN, OTRO).
+5. ¿Umbral por defecto de alerta de saldo restante? (p. ej. **$200.000 CLP**).
+
+Si te parece bien, en la siguiente respuesta te dejo el **esqueleto del repo** (estructura de carpetas, comandos, `.env.example`, y los primeros modelos/acciones) listo para copy-paste.
+
+
+
+¡Buenísimo! Con tus respuestas cierro decisiones y te dejo **esqueleto de repo**, **schema Prisma actualizado**, **tareas inmediatas** y **cómo resolvemos PDF/imagen y atributos configurables**.
+
+---
+
+# Decisiones finales
+
+* **Exportes**: **@react-pdf** para PDF (ligero, sin Chromium). Para imagen usaremos **Satori/@vercel/og** con una **plantilla dedicada** (no “screenshot” del DOM, sino un render server-side de la misma data). Cero binarios pesados y funciona perfecto en Vercel.
+* **DB**: **PostgreSQL**.
+* **Montos**: guardamos **monto total** y **monto por cuota** (ambos).
+* **Tipos de cuenta** seed: **COMERCIAL, CASA, SUSCRIPCION, OTRO**.
+* **Umbral**: **configurable por usuario** (en `UserSettings`).
+* **Atributos configurables**: sistema de **listas por usuario** (bancos, casas comerciales, deudores, etc.) vía una tabla genérica `Attribute` + tagging M:N (`AccountAttribute`). 100% gestionable por usuario y filtrable.
+
+---
+
+# Estructura del repo (App Router, monolito)
+
+```
+apps/
+  web/                         # Next.js 15
+    app/
+      (auth)/login/page.tsx
+      (auth)/register/page.tsx
+      (dashboard)/dashboard/page.tsx
+      (dashboard)/balances/[year]/[month]/page.tsx
+      (dashboard)/accounts/new/page.tsx
+      (dashboard)/accounts/[id]/page.tsx
+      (admin)/permissions/page.tsx
+      (admin)/features/page.tsx
+      api/
+        export/pdf/route.ts     # @react-pdf
+        export/image/route.ts   # satori/@vercel/og (PNG)
+        notify/whatsapp/route.ts
+    components/                 # UI y DS (shadcn/ui)
+    lib/
+      auth.ts                   # Auth.js
+      prisma.ts                 # Prisma client
+      crypto.ts                 # AES-GCM helpers
+      perms.ts                  # helpers permisos/flags
+      export/
+        pdf.tsx                 # plantilla @react-pdf
+        image.tsx               # plantilla satori
+      calc/
+        schedule.ts             # generador de cuotas
+        totals.ts               # cálculos de balance
+    styles/
+    middleware.ts               # Rutas protegidas
+    prisma/
+      schema.prisma
+    tests/
+      unit/
+      e2e/
+    .env.example
+    package.json
+    tsconfig.json
+    next.config.js
+    tailwind.config.ts
+    postcss.config.js
+.github/
+  workflows/
+    ci.yml
+    deploy.yml
+```
+
+---
+
+# `.env.example`
+
+```
+# Auth
+NEXTAUTH_SECRET=changeme
+NEXTAUTH_URL=http://localhost:3000
+
+# DB
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+
+# Crypto
+FIELD_ENCRYPTION_KEY=base64-32bytes   # 256-bit key (Base64)
+
+# WhatsApp (opcional)
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_WHATSAPP_FROM=
+```
+
+---
+
+# Prisma schema (ajustado a tus últimas indicaciones)
+
+```prisma
+// prisma/schema.prisma
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+generator client { provider = "prisma-client-js" }
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String
+  nameEnc       Bytes?
+  rutEnc        Bytes?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  settings      UserSettings?
+  roles         UserRole[]
+  permissions   UserPermission[]
+  balances      Balance[]
+  accounts      Account[]         @relation("OwnerAccounts")
+  cards         Card[]
+  shares        AccountShare[]
+
+  attributes    Attribute[]       // listas propias (bancos, deudores, etc.)
+}
+
+model UserSettings {
+  userId              String  @id
+  lowBalanceThreshold Decimal @default(0) // configurable por usuario
+  currency            String  @default("CLP")
+  user                User    @relation(fields: [userId], references: [id])
+}
+
+model Role {
+  id    String @id @default(cuid())
+  code  String @unique // 'admin' | 'user'
+  users UserRole[]
+}
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id])
+  role   Role @relation(fields: [roleId], references: [id])
+  @@id([userId, roleId])
+}
+
+model Permission {
+  id   String @id @default(cuid())
+  code String @unique // 'module.reports.view', etc.
+  desc String
+  users UserPermission[]
+}
+model UserPermission {
+  userId       String
+  permissionId String
+  enabled      Boolean @default(true)
+  user         User       @relation(fields: [userId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+  @@id([userId, permissionId])
+}
+
+model Balance {
+  id         String   @id @default(cuid())
+  userId     String
+  month      Int
+  year       Int
+  salaryCLP  Decimal  // sueldo congelado para ese mes
+  savingsCLP Decimal  @default(0)
+  notes      String?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id])
+  @@unique([userId, month, year])
+}
+
+model Card {
+  id        String   @id @default(cuid())
+  userId    String
+  nameEnc   Bytes
+  bankType  CardType  // DEBIT | CREDIT
+  user      User     @relation(fields: [userId], references: [id])
+  accounts  Account[]
+}
+enum CardType { DEBIT CREDIT }
+
+enum AccountType { COMERCIAL CASA SUSCRIPCION OTRO }
+
+model Account {
+  id              String   @id @default(cuid())
+  ownerId         String
+  titleEnc        Bytes
+  descriptionEnc  Bytes?
+  debtorNameEnc   Bytes?           // opcional si no usas Attribute DEBTOR
+  type            AccountType
+  isSubscription  Boolean @default(false)
+  installments    Int?             // n° cuotas (si no es suscripción)
+  amountTotalCLP  Decimal          // total de la compra/compromiso
+  amountPerInstCLP Decimal         // valor de cada cuota (si suscripción -> = monto mensual)
+  cardId          String?
+  createdAt       DateTime @default(now())
+
+  owner           User    @relation("OwnerAccounts", fields: [ownerId], references: [id])
+  card            Card?   @relation(fields: [cardId], references: [id])
+  schedule        Installment[]
+  shares          AccountShare[]
+  tags            AccountAttribute[]
+
+  @@index([ownerId, type])
+}
+
+model Installment {
+  id         String   @id @default(cuid())
+  accountId  String
+  month      Int
+  year       Int
+  amountCLP  Decimal
+  status     InstallmentStatus @default(PENDING) // PENDING/PAID/SKIPPED
+  account    Account  @relation(fields: [accountId], references: [id])
+  @@unique([accountId, month, year])
+}
+enum InstallmentStatus { PENDING PAID SKIPPED }
+
+model AccountShare {
+  accountId String
+  userId    String
+  canView   Boolean @default(true)
+  canEdit   Boolean @default(false)
+  account   Account @relation(fields: [accountId], references: [id])
+  user      User    @relation(fields: [userId], references: [id])
+  @@id([accountId, userId])
+}
+
+//
+// Atributos configurables por usuario
+//
+enum AttributeKind { BANK COMMERCIAL_HOUSE DEBTOR CUSTOM }
+
+model Attribute {
+  id       String        @id @default(cuid())
+  userId   String
+  kind     AttributeKind
+  key      String        // slug único por usuario+kind
+  nameEnc  Bytes         // nombre cifrado si es sensible
+  user     User          @relation(fields: [userId], references: [id])
+  usedBy   AccountAttribute[]
+  @@unique([userId, kind, key])
+}
+
+model AccountAttribute {
+  accountId   String
+  attributeId String
+  account     Account   @relation(fields: [accountId], references: [id])
+  attribute   Attribute @relation(fields: [attributeId], references: [id])
+  @@id([accountId, attributeId])
+}
+
+model FeatureFlag {
+  key     String @id
+  enabled Boolean @default(false)
+}
+```
+
+**Cómo filtras**: por deudor, banco, casa comercial, etc. usando `AccountAttribute` (JOIN por `Attribute.kind`). Esto te permite crear **listas editables por usuario** (ej. “CMR”, “Santander”, “María”, “Ripley”) y etiquetar cuentas con uno o varios atributos; los filtros solo muestran tus propios atributos.
+
+---
+
+# Helpers clave (resumen)
+
+* `crypto.ts` → `encryptText(plain: string): Buffer` / `decryptText(buf: Buffer): string` (AES-256-GCM).
+* `calc/schedule.ts` → dado `isSubscription`, `installments`, `amountTotal`, `amountPerInst`, `startYear/month` ⇒ devuelve `Installment[]` consecutivos.
+* `calc/totals.ts` → totales por mes (sumas de `Installment.PENDING` ± filtros).
+
+---
+
+# Rutas/acciones iniciales (MVP)
+
+* `upsertBalance({year, month, salaryCLP, savingsCLP})`
+* `createAccount({ ...data, attributes: { kind, key }[] })` ⇒ crea/relaciona `Attribute` por usuario si no existe + genera `Installment[]`
+* `updateAccount`, `deleteAccount`
+* `listMonthlyView({year, month, filters})` ⇒ devuelve tabla mensual agregada + totales
+* `export/pdf?year&month&filters` (usa plantilla @react-pdf)
+* `export/image?year&month&filters` (usa satori, PNG)
+* `attributes` CRUD (crear/renombrar/borrar claves de listas)
+* `settings.update({ lowBalanceThreshold })`
+
+---
+
+# UI: pantallas y componentes
+
+* **/dashboard**: KPIs (Deuda mes, Sueldo, Ahorro, Restante). Gráfico composición por **tipo** y por **atributo BANK/COMMERCIAL_HOUSE**. Banner si `restante < threshold`.
+* **/balances/[YYYY]/[MM]**: tabla mensual (filtros por `Attribute.kind`, tarjeta y tipo). Botones **Export PDF** / **Export PNG**.
+* **/accounts/new**: Form
+
+  * `isSubscription` → oculta `installments`.
+  * `amountTotal` y `amountPerInst` (si solo das uno, calculamos el otro).
+  * Selector múltiple de **Atributos** por kind (autocomplete con creación en línea).
+* **/admin/features**: toggles de `FeatureFlag`.
+* **/admin/permissions**: toggles de `UserPermission`.
+* **/settings**: umbral de saldo restante y gestión de **listas de atributos** (CRUD por kind).
+
+---
+
+# TODO inmediato (acciones concretas)
+
+1. **Bootstrap** (Sprint 0)
+
+   * Crear repo + Next 15 + Tailwind + shadcn/ui.
+   * Añadir Auth.js (credentials) + middleware protegido.
+   * Configurar Prisma + migración con el schema de arriba.
+   * Implementar `crypto.ts` (AES-GCM) y tests unitarios.
+   * Seeds: roles (`admin`, `user`), tipos base (`AttributeKind` no necesita seed), `AccountType` por enum.
+2. **Balances** (Sprint 1 - parte 1)
+
+   * Server action `upsertBalance`.
+   * Página `/balances/[y]/[m]` con resumen.
+3. **Cuentas + cuotas + atributos** (Sprint 1 - parte 2)
+
+   * Form de creación con **creación en línea** de atributos (ej.: escribes “CMR” → crea `Attribute{kind:BANK,key:'cmr'}`).
+   * Generador `Installment[]` y persistencia.
+   * Vista mensual con filtros (por `Attribute.kind`/`key`, por tarjeta y por tipo).
+4. **Exportes** (Sprint 2)
+
+   * Plantilla `pdf.tsx` (logo/título, totales, tabla, agrupadores “por deudor” y “por banco”).
+   * Plantilla `image.tsx` (resumen PNG con tablas compactas).
+5. **Ajustes** (Sprint 2)
+
+   * Settings de usuario (umbral).
+   * Alertas visuales si `restante < threshold` o si `amountTotal`/`amountPerInst` > valor configurable (podemos agregar `highAmountThreshold` en `UserSettings` luego).
+6. **Admin** (Sprint 2)
+
+   * UI de permisos/flags y `hasPermission()` en front para ocultar módulos.
+
+*(tests unitarios y e2e acompañan cada paso; coverage objetivo ≥ 80%)*
+
+---
+
+# Notas de implementación
+
+* **Redondeos**: al calcular `amountPerInst = roundHalfUp(total / cuotas)`. Guardamos ambos y en las cuotas grabamos el monto exacto **por cuota** (puedes ajustar el último mes para cuadrar centavos).
+* **Fechas de inicio**: asumimos “cuota 1” en el **mes de creación**; si necesitas seleccionar el mes de inicio, añadimos `startYear/month` al formulario.
+* **Filtros por mes**: todo el sistema trabaja **mensual**, las queries usan `Installment.year/month` + filtros.
+* **Cifrado**: si algún atributo no es sensible (ej. “CMR”), podemos no cifrar `Attribute.name`. Yo lo dejo cifrado por consistencia; si te incomoda perder búsquedas por texto parcial, podemos guardar `nameLowerHash` para búsquedas exactas por key y mostrar el `name` desencriptado.
+
+---
+
+# ¿Qué necesitas de mí ahora?
+
+Puedo prepararte **los primeros archivos** (Prisma, helpers de cifrado, generador de cuotas y server action `createAccount`) listos para pegar. Si te sirve, te los dejo en la próxima respuesta con código completo (incluyendo tests unitarios básicos) y un **checklist** para correr `pnpm i && pnpm dev`.
