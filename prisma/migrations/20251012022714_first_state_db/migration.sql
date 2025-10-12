@@ -1,4 +1,7 @@
 -- CreateEnum
+CREATE TYPE "Role" AS ENUM ('USER', 'ADMIN');
+
+-- CreateEnum
 CREATE TYPE "CardType" AS ENUM ('DEBIT', 'CREDIT');
 
 -- CreateEnum
@@ -13,8 +16,12 @@ CREATE TYPE "AttributeKind" AS ENUM ('BANK', 'COMMERCIAL_HOUSE', 'DEBTOR', 'CUST
 -- CreateTable
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
+    "name" TEXT,
     "email" TEXT NOT NULL,
-    "passwordHash" TEXT NOT NULL,
+    "password" TEXT,
+    "emailVerified" TIMESTAMP(3),
+    "image" TEXT,
+    "role" "Role" NOT NULL DEFAULT 'USER',
     "nameEnc" BYTEA,
     "rutEnc" BYTEA,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -24,28 +31,40 @@ CREATE TABLE "User" (
 );
 
 -- CreateTable
+CREATE TABLE "Account" (
+    "userId" TEXT NOT NULL,
+    "type" TEXT NOT NULL,
+    "provider" TEXT NOT NULL,
+    "providerAccountId" TEXT NOT NULL,
+    "refresh_token" TEXT,
+    "access_token" TEXT,
+    "expires_at" INTEGER,
+    "token_type" TEXT,
+    "scope" TEXT,
+    "id_token" TEXT,
+    "session_state" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Account_pkey" PRIMARY KEY ("provider","providerAccountId")
+);
+
+-- CreateTable
+CREATE TABLE "VerificationToken" (
+    "identifier" TEXT NOT NULL,
+    "token" TEXT NOT NULL,
+    "expires" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "VerificationToken_pkey" PRIMARY KEY ("identifier","token")
+);
+
+-- CreateTable
 CREATE TABLE "UserSettings" (
     "userId" TEXT NOT NULL,
     "lowBalanceThreshold" DECIMAL(65,30) NOT NULL DEFAULT 0,
     "currency" TEXT NOT NULL DEFAULT 'CLP',
 
     CONSTRAINT "UserSettings_pkey" PRIMARY KEY ("userId")
-);
-
--- CreateTable
-CREATE TABLE "Role" (
-    "id" TEXT NOT NULL,
-    "code" TEXT NOT NULL,
-
-    CONSTRAINT "Role_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "UserRole" (
-    "userId" TEXT NOT NULL,
-    "roleId" TEXT NOT NULL,
-
-    CONSTRAINT "UserRole_pkey" PRIMARY KEY ("userId","roleId")
 );
 
 -- CreateTable
@@ -91,7 +110,7 @@ CREATE TABLE "Card" (
 );
 
 -- CreateTable
-CREATE TABLE "Account" (
+CREATE TABLE "Expense" (
     "id" TEXT NOT NULL,
     "ownerId" TEXT NOT NULL,
     "titleEnc" BYTEA NOT NULL,
@@ -105,13 +124,13 @@ CREATE TABLE "Account" (
     "cardId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT "Account_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "Expense_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "Installment" (
     "id" TEXT NOT NULL,
-    "accountId" TEXT NOT NULL,
+    "expenseId" TEXT NOT NULL,
     "month" INTEGER NOT NULL,
     "year" INTEGER NOT NULL,
     "amountCLP" DECIMAL(65,30) NOT NULL,
@@ -121,13 +140,13 @@ CREATE TABLE "Installment" (
 );
 
 -- CreateTable
-CREATE TABLE "AccountShare" (
-    "accountId" TEXT NOT NULL,
+CREATE TABLE "ExpenseShare" (
+    "expenseId" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "canView" BOOLEAN NOT NULL DEFAULT true,
     "canEdit" BOOLEAN NOT NULL DEFAULT false,
 
-    CONSTRAINT "AccountShare_pkey" PRIMARY KEY ("accountId","userId")
+    CONSTRAINT "ExpenseShare_pkey" PRIMARY KEY ("expenseId","userId")
 );
 
 -- CreateTable
@@ -142,11 +161,11 @@ CREATE TABLE "Attribute" (
 );
 
 -- CreateTable
-CREATE TABLE "AccountAttribute" (
-    "accountId" TEXT NOT NULL,
+CREATE TABLE "ExpenseAttribute" (
+    "expenseId" TEXT NOT NULL,
     "attributeId" TEXT NOT NULL,
 
-    CONSTRAINT "AccountAttribute_pkey" PRIMARY KEY ("accountId","attributeId")
+    CONSTRAINT "ExpenseAttribute_pkey" PRIMARY KEY ("expenseId","attributeId")
 );
 
 -- CreateTable
@@ -161,34 +180,28 @@ CREATE TABLE "FeatureFlag" (
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Role_code_key" ON "Role"("code");
-
--- CreateIndex
 CREATE UNIQUE INDEX "Permission_code_key" ON "Permission"("code");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Balance_userId_month_year_key" ON "Balance"("userId", "month", "year");
 
 -- CreateIndex
-CREATE INDEX "Account_ownerId_type_idx" ON "Account"("ownerId", "type");
+CREATE INDEX "Expense_ownerId_type_idx" ON "Expense"("ownerId", "type");
 
 -- CreateIndex
 CREATE INDEX "Installment_year_month_status_idx" ON "Installment"("year", "month", "status");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Installment_accountId_month_year_key" ON "Installment"("accountId", "month", "year");
+CREATE UNIQUE INDEX "Installment_expenseId_month_year_key" ON "Installment"("expenseId", "month", "year");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Attribute_userId_kind_key_key" ON "Attribute"("userId", "kind", "key");
 
 -- AddForeignKey
+ALTER TABLE "Account" ADD CONSTRAINT "Account_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "UserSettings" ADD CONSTRAINT "UserSettings_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "UserRole" ADD CONSTRAINT "UserRole_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "UserRole" ADD CONSTRAINT "UserRole_roleId_fkey" FOREIGN KEY ("roleId") REFERENCES "Role"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "UserPermission" ADD CONSTRAINT "UserPermission_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -203,25 +216,25 @@ ALTER TABLE "Balance" ADD CONSTRAINT "Balance_userId_fkey" FOREIGN KEY ("userId"
 ALTER TABLE "Card" ADD CONSTRAINT "Card_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Account" ADD CONSTRAINT "Account_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Expense" ADD CONSTRAINT "Expense_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Account" ADD CONSTRAINT "Account_cardId_fkey" FOREIGN KEY ("cardId") REFERENCES "Card"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "Expense" ADD CONSTRAINT "Expense_cardId_fkey" FOREIGN KEY ("cardId") REFERENCES "Card"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Installment" ADD CONSTRAINT "Installment_accountId_fkey" FOREIGN KEY ("accountId") REFERENCES "Account"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Installment" ADD CONSTRAINT "Installment_expenseId_fkey" FOREIGN KEY ("expenseId") REFERENCES "Expense"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "AccountShare" ADD CONSTRAINT "AccountShare_accountId_fkey" FOREIGN KEY ("accountId") REFERENCES "Account"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ExpenseShare" ADD CONSTRAINT "ExpenseShare_expenseId_fkey" FOREIGN KEY ("expenseId") REFERENCES "Expense"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "AccountShare" ADD CONSTRAINT "AccountShare_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ExpenseShare" ADD CONSTRAINT "ExpenseShare_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Attribute" ADD CONSTRAINT "Attribute_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "AccountAttribute" ADD CONSTRAINT "AccountAttribute_accountId_fkey" FOREIGN KEY ("accountId") REFERENCES "Account"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ExpenseAttribute" ADD CONSTRAINT "ExpenseAttribute_expenseId_fkey" FOREIGN KEY ("expenseId") REFERENCES "Expense"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "AccountAttribute" ADD CONSTRAINT "AccountAttribute_attributeId_fkey" FOREIGN KEY ("attributeId") REFERENCES "Attribute"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ExpenseAttribute" ADD CONSTRAINT "ExpenseAttribute_attributeId_fkey" FOREIGN KEY ("attributeId") REFERENCES "Attribute"("id") ON DELETE CASCADE ON UPDATE CASCADE;

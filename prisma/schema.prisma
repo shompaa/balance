@@ -7,23 +7,61 @@ generator client {
   provider = "prisma-client-js"
 }
 
-model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  passwordHash String
-  nameEnc      Bytes?
-  rutEnc       Bytes?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+enum Role {
+  USER
+  ADMIN
+}
 
-  settings    UserSettings?
-  roles       UserRole[]
-  permissions UserPermission[]
-  balances    Balance[]
-  accounts    Account[]        @relation("OwnerAccounts")
-  cards       Card[]
-  shares      AccountShare[]
-  attributes  Attribute[]
+model User {
+  id            String           @id @default(cuid())
+  name          String?
+  email         String           @unique
+  password      String?
+  emailVerified DateTime?
+  image         String?
+  role          Role             @default(USER)
+  accounts      Account[]
+  settings      UserSettings?
+  permissions   UserPermission[]
+  balances      Balance[]
+  expenses      Expense[]        @relation("OwnerExpenses")
+  cards         Card[]
+  shares        ExpenseShare[]
+  attributes    Attribute[]
+  nameEnc       Bytes?
+  rutEnc        Bytes?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model VerificationToken {
+  identifier String   @unique
+  token      String
+  expires    DateTime
+
+  @@id([identifier])
 }
 
 model UserSettings {
@@ -31,21 +69,6 @@ model UserSettings {
   lowBalanceThreshold Decimal @default(0)
   currency            String  @default("CLP")
   user                User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
-
-model Role {
-  id    String     @id @default(cuid())
-  code  String     @unique
-  users UserRole[]
-}
-
-model UserRole {
-  userId String
-  roleId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
-
-  @@id([userId, roleId])
 }
 
 model Permission {
@@ -85,7 +108,7 @@ model Card {
   nameEnc  Bytes
   bankType CardType
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  accounts Account[]
+  expenses Expense[]
 }
 
 enum CardType {
@@ -100,7 +123,7 @@ enum AccountType {
   OTRO
 }
 
-model Account {
+model Expense {
   id               String      @id @default(cuid())
   ownerId          String
   titleEnc         Bytes
@@ -114,25 +137,25 @@ model Account {
   cardId           String?
   createdAt        DateTime    @default(now())
 
-  owner    User               @relation("OwnerAccounts", fields: [ownerId], references: [id], onDelete: Cascade)
+  owner    User               @relation("OwnerExpenses", fields: [ownerId], references: [id], onDelete: Cascade)
   card     Card?              @relation(fields: [cardId], references: [id], onDelete: SetNull)
   schedule Installment[]
-  shares   AccountShare[]
-  tags     AccountAttribute[]
+  shares   ExpenseShare[]
+  tags     ExpenseAttribute[]
 
   @@index([ownerId, type])
 }
 
 model Installment {
   id        String            @id @default(cuid())
-  accountId String
+  expenseId String
   month     Int
   year      Int
   amountCLP Decimal
   status    InstallmentStatus @default(PENDING)
-  account   Account           @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  expense   Expense           @relation(fields: [expenseId], references: [id], onDelete: Cascade)
 
-  @@unique([accountId, month, year])
+  @@unique([expenseId, month, year])
   @@index([year, month, status])
 }
 
@@ -142,15 +165,15 @@ enum InstallmentStatus {
   SKIPPED
 }
 
-model AccountShare {
-  accountId String
+model ExpenseShare {
+  expenseId String
   userId    String
   canView   Boolean @default(true)
   canEdit   Boolean @default(false)
-  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  expense   Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
   user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@id([accountId, userId])
+  @@id([expenseId, userId])
 }
 
 enum AttributeKind {
@@ -167,18 +190,18 @@ model Attribute {
   key     String
   nameEnc Bytes
   user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  usedBy  AccountAttribute[]
+  usedBy  ExpenseAttribute[]
 
   @@unique([userId, kind, key])
 }
 
-model AccountAttribute {
-  accountId   String
+model ExpenseAttribute {
+  expenseId   String
   attributeId String
-  account     Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  expense     Expense   @relation(fields: [expenseId], references: [id], onDelete: Cascade)
   attribute   Attribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
 
-  @@id([accountId, attributeId])
+  @@id([expenseId, attributeId])
 }
 
 model FeatureFlag {
