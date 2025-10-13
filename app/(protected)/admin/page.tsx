@@ -1,16 +1,18 @@
 import { auth } from '@/auth'
 import LogOutButton from '@/components/logout-button';
+import { redirect } from 'next/navigation';
 import React from 'react'
 
 const AdminPage = async () => {
   const session = await auth();
 
-  console.log({ session })
-
-  if (session?.user?.role !== 'ADMIN') {
-    return <div>No autorizado</div>
+  if (!session) {
+    redirect('/login')
   }
 
+  if (session?.user?.role !== 'ADMIN') {
+    redirect('/dashboard')
+  }
 
   return (
     <div className="container">

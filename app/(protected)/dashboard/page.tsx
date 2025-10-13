@@ -1,11 +1,12 @@
 import { auth } from "@/auth"
 import LogOutButton from "@/components/logout-button"
+import { redirect } from "next/navigation"
  
 export default async function DashboardPage() {
   const session = await auth()
  
   if (!session) {
-    return <div>Not authenticated</div>
+    redirect("/login")
   }
  
   return (
