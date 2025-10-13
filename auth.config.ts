@@ -3,7 +3,6 @@ import Credentials from "next-auth/providers/credentials"
 import { loginSchema } from "./lib/zod"
 import { prisma } from "./lib/prisma"
 import bcrypt from "bcryptjs"
-import { nanoid } from 'nanoid';
 
 const authConfig = {
   providers: [
@@ -67,6 +66,17 @@ const authConfig = {
     signIn: "/login",
   },
   callbacks: {
+    authorized({ auth, request: { nextUrl } }: { auth: any; request: any }) {
+      const isLoggedIn = !!auth?.user;
+      const publicRoutes = ["/login", "/register", "/forgot-password", "/reset-password", "/api/auth/verify-email", "/", "/error"];
+      const isPublicRoute = publicRoutes.includes(nextUrl.pathname);
+
+      if (!isLoggedIn && !isPublicRoute) {
+        return false; // Redirect to login page
+      }
+
+      return true;
+    },
     jwt({ token, user }: { token: any; user?: any }) {
       if (user) {
         token.role = user.role

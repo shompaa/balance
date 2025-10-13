@@ -1,23 +1,4 @@
-import NextAuth from "next-auth"
-import authConfig from "./auth.config"
-import { NextResponse } from "next/server";
-
-// @ts-expect-error - NextAuth v5 beta tiene problemas de tipos
-const { auth: middleware } = NextAuth(authConfig)
-
-const publicRoutes = ["/login", "/register", "/forgot-password", "/reset-password", "/api/auth/verify-email", "/", "/error"];
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export default middleware((req: any) => {
-  const { nextUrl, auth } = req;
-  const isLoggedIn = !!auth?.user;
-
-  if (!publicRoutes.includes(nextUrl.pathname) && !isLoggedIn) {
-    return NextResponse.redirect(new URL("/login", nextUrl.origin));
-  }
-
-  return NextResponse.next();
-});
+export { auth as middleware } from "@/auth"
 
 export const config = {
   matcher: [
