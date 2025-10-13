@@ -13,7 +13,7 @@ import {
   FormMessage,
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
-import { loginAction, registerAction } from "@/actions/auth-action"
+import { registerAction } from "@/actions/auth-action"
 import { useState, useTransition } from "react"
 import { useRouter } from "next/navigation"
 
