@@ -44,3 +44,6 @@ next-env.d.ts
 
 # Ignorar archivos .txt
 *.txt
+
+*storybook.log
+storybook-static
