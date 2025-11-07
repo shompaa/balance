@@ -1,5 +1,4 @@
 import { auth } from "@/auth"
-import LogOutButton from "@/components/logout-button"
 import { redirect } from "next/navigation"
  
 export default async function DashboardPage() {
@@ -11,8 +10,8 @@ export default async function DashboardPage() {
  
   return (
     <div className="container">
+      Dashboard
       <pre>{JSON.stringify(session, null, 2)}</pre>
-      <LogOutButton />
     </div>
   )
 }
